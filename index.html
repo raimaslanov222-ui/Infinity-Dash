@@ -10,11 +10,16 @@
         .auth-box { display: flex; flex-direction: column; gap: 10px; width: 260px; }
         input { padding: 14px; border-radius: 10px; border: 1px solid #0ff; background: #111; color: #fff; outline: none; font-size: 16px; }
         button { padding: 14px; font-weight: bold; background: transparent; border: 2px solid #0ff; color: #0ff; border-radius: 12px; cursor: pointer; font-size: 16px; }
-        button:active { background: #0ff; color: #000; }
-        #topBtn { position: absolute; top: 15px; right: 15px; width: 55px; height: 55px; z-index: 150; border: 2px solid #f0f; border-radius: 50%; background: rgba(0,0,0,0.6); font-size: 28px; display: flex; align-items: center; justify-content: center; box-shadow: 0 0 15px #f0f; cursor: pointer; }
+        
+        #topBtn { position: absolute; top: 15px; right: 15px; width: 55px; height: 55px; z-index: 150; border: 2px solid #f0f; border-radius: 50%; background: rgba(0,0,0,0.6); font-size: 28px; display: flex; align-items: center; justify-content: center; box-shadow: 0 0 15px #f0f; }
+        #adminBtn { position: absolute; top: 80px; left: 15px; display: none; border-color: #ff0; color: #ff0; padding: 5px 10px; font-size: 12px; z-index: 150; }
+        
+        #adminPanel { display: none; position: absolute; top: 20%; left: 10%; width: 80%; background: #111; border: 2px solid #ff0; padding: 20px; z-index: 300; border-radius: 15px; flex-direction: column; gap: 10px; }
         #leaderboard { display: none; position: absolute; top: 5%; left: 5%; width: 90%; height: 90%; background: #0a0a0a; border: 2px solid #f0f; border-radius: 20px; z-index: 200; padding: 20px; box-sizing: border-box; flex-direction: column; }
-        #scoresList { flex-grow: 1; overflow-y: auto; margin-top: 15px; border-top: 1px solid #333; }
-        .score-item { display: flex; justify-content: space-between; padding: 14px; border-bottom: 1px solid #222; font-size: 18px; }
+        #scoresList { flex-grow: 1; overflow-y: auto; margin-top: 15px; }
+        .score-item { display: flex; justify-content: space-between; align-items: center; padding: 12px; border-bottom: 1px solid #222; }
+        .del-btn { color: #f44; border: 1px solid #f44; padding: 2px 8px; border-radius: 5px; font-size: 12px; }
+        
         #hud { position: absolute; top: 20px; left: 20px; font-size: 35px; font-weight: bold; z-index: 50; text-shadow: 0 0 10px #0ff; }
         .hidden { display: none !important; }
     </style>
@@ -23,13 +28,22 @@
 
     <div id="hud">0</div>
     <div id="topBtn">🏆</div>
+    <button id="adminBtn">ADM</button>
+
+    <div id="adminPanel">
+        <h3 style="color:#ff0; margin:0; text-align:center;">ADMIN TOOLS</h3>
+        <button id="ghostToggle">GHOST MODE: OFF</button>
+        <button id="speedBtn">SPEED: NORMAL</button>
+        <button id="addScoreBtn">+50 SCORE</button>
+        <button onclick="document.getElementById('adminPanel').style.display='none'">CLOSE</button>
+    </div>
 
     <div id="authScreen" class="overlay">
-        <h1 style="color:#0ff">NEON AUTH</h1>
+        <h1 style="color:#0ff">NEON LOGIN</h1>
         <div class="auth-box">
             <input type="email" id="email" placeholder="Email">
             <input type="password" id="password" placeholder="Пароль">
-            <button id="authBtn">ИГРАТЬ</button>
+            <button id="authBtn">ENTER</button>
         </div>
     </div>
 
@@ -71,12 +85,17 @@ firebase.initializeApp(firebaseConfig);
 const db = firebase.firestore();
 const auth = firebase.auth();
 
+const adminEmail = "raimaslanov222@gmail.com";
+let isAdmin = false, isGhostMode = false, gameSpeedMult = 1;
+const colors = ['#0ff', '#f0f', '#0f0', '#ff0', '#f44', '#fff', '#70f'];
+
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
 canvas.width = window.innerWidth;
 canvas.height = window.innerHeight;
 
-let gameState = 'AUTH', prevGameState = '', score = 0, obstacles = [], frame = 0, currentUser = null;
+let gameState = 'AUTH', score = 0, obstacles = [], frame = 0, currentUser = null;
+let bestScoreInCloud = 0, animationId = null;
 
 const player = { x: 80, y: canvas.height/2, r: 12, v: 0, g: 0.22, j: -5.5 };
 
@@ -86,26 +105,41 @@ document.getElementById('authBtn').onclick = async () => {
     try { await auth.signInWithEmailAndPassword(email, pass); } 
     catch (e) {
         if (e.code === 'auth/user-not-found' || e.code === 'auth/invalid-credential') {
-            try { await auth.createUserWithEmailAndPassword(email, pass); } 
-            catch (err) { alert(err.message); }
+            try { await auth.createUserWithEmailAndPassword(email, pass); } catch (err) { alert(err.message); }
         } else { alert(e.message); }
     }
 };
 
-auth.onAuthStateChanged(user => { if (user) { currentUser = user; gameState = 'MENU'; document.getElementById('authScreen').classList.add('hidden'); document.getElementById('menuScreen').classList.remove('hidden'); } });
+auth.onAuthStateChanged(async user => { 
+    if (user) { 
+        currentUser = user;
+        isAdmin = (user.email === adminEmail);
+        if(isAdmin) document.getElementById('adminBtn').style.display = 'block';
+        const doc = await db.collection("leaderboard").doc(user.uid).get();
+        if (doc.exists) bestScoreInCloud = doc.data().score;
+        gameState = 'MENU'; 
+        document.getElementById('authScreen').classList.add('hidden'); 
+        document.getElementById('menuScreen').classList.remove('hidden'); 
+        if(!animationId) draw();
+    } 
+});
+
+async function saveScoreToCloud(currentScore) {
+    if (!currentUser || currentScore <= bestScoreInCloud) return;
+    bestScoreInCloud = currentScore;
+    await db.collection("leaderboard").doc(currentUser.uid).set({
+        name: currentUser.email.split('@')[0],
+        score: currentScore,
+        uid: currentUser.uid,
+        ts: Date.now()
+    }, { merge: true });
+}
 
 function spawn() {
     const gap = 280 - Math.min(score * 1.5, 60); 
     const h = Math.random() * (canvas.height - gap - 150) + 75;
-    obstacles.push({ x: canvas.width, top: h, bottom: h + gap, w: 60, passed: false });
-}
-
-function drawCrystal(x, y, w, h, isTop) {
-    ctx.fillStyle = '#111'; ctx.strokeStyle = isTop ? '#f0f' : '#0ff'; ctx.lineWidth = 3;
-    ctx.beginPath();
-    if (isTop) { ctx.moveTo(x,0); ctx.lineTo(x+w,0); ctx.lineTo(x+w/2,h); }
-    else { ctx.moveTo(x+w/2,y); ctx.lineTo(x+w,canvas.height); ctx.lineTo(x,canvas.height); }
-    ctx.closePath(); ctx.fill(); ctx.stroke();
+    const color = colors[Math.floor(Math.random() * colors.length)];
+    obstacles.push({ x: canvas.width, top: h, bottom: h + gap, w: 60, passed: false, color: color });
 }
 
 function update() {
@@ -113,106 +147,101 @@ function update() {
     player.v += player.g; player.y += player.v;
     if (player.y > canvas.height || player.y < 0) die();
     if (frame % 100 === 0) spawn();
+    
     obstacles.forEach((o, i) => {
-        o.x -= (3.5 + score * 0.05);
-        if (player.x + 7 > o.x && player.x - 7 < o.x + o.w) {
+        o.x -= (3.5 + score * 0.05) * gameSpeedMult;
+        if (!isGhostMode && player.x + 7 > o.x && player.x - 7 < o.x + o.w) {
             if (player.y - 7 < o.top || player.y + 7 > o.bottom) die();
         }
-        if (!o.passed && o.x < player.x) { o.passed=true; score++; document.getElementById('hud').innerText=score; }
+        if (!o.passed && o.x < player.x) { 
+            o.passed = true; score++; 
+            document.getElementById('hud').innerText = score;
+            saveScoreToCloud(score);
+        }
         if (o.x + o.w < 0) obstacles.splice(i, 1);
     });
     frame++;
 }
 
 function draw() {
+    animationId = requestAnimationFrame(draw);
     ctx.fillStyle = '#050505'; ctx.fillRect(0,0,canvas.width,canvas.height);
-    obstacles.forEach(o => { drawCrystal(o.x, 0, o.w, o.top, true); drawCrystal(o.x, o.bottom, o.w, canvas.height - o.bottom, false); });
-    ctx.beginPath(); ctx.arc(player.x, player.y, player.r, 0, Math.PI*2);
-    ctx.fillStyle = '#fff'; ctx.shadowBlur = 15; ctx.shadowColor = '#0ff'; ctx.fill(); ctx.shadowBlur = 0;
     
-    // Если на паузе — просто рисуем текущий кадр без апдейта
-    if (gameState === 'PLAY') {
-        update();
-        requestAnimationFrame(draw);
-    } else if (gameState === 'PAUSE') {
-        requestAnimationFrame(draw);
-    }
+    obstacles.forEach(o => {
+        ctx.fillStyle = '#111'; ctx.strokeStyle = o.color; ctx.lineWidth = 3;
+        ctx.shadowBlur = 10; ctx.shadowColor = o.color;
+        ctx.beginPath(); ctx.moveTo(o.x,0); ctx.lineTo(o.x+o.w,0); ctx.lineTo(o.x+o.w/2,o.top); ctx.closePath(); ctx.fill(); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(o.x+o.w/2,o.bottom); ctx.lineTo(o.x+o.w,canvas.height); ctx.lineTo(o.x,canvas.height); ctx.closePath(); ctx.fill(); ctx.stroke();
+        ctx.shadowBlur = 0;
+    });
+
+    ctx.beginPath(); ctx.arc(player.x, player.y, player.r, 0, Math.PI*2);
+    ctx.fillStyle = isGhostMode ? 'rgba(255,255,255,0.3)' : '#fff'; 
+    ctx.shadowBlur = isGhostMode ? 0 : 15; ctx.shadowColor = '#0ff'; ctx.fill();
+    ctx.shadowBlur = 0;
+    
+    if (gameState === 'PLAY') update();
 }
 
-async function die() {
+function die() {
     gameState = 'DEAD';
     document.getElementById('deathScreen').classList.remove('hidden');
     document.getElementById('finalScore').innerText = score;
-    
-    if (score > 0 && currentUser) {
-        const userRef = db.collection("leaderboard").doc(currentUser.uid);
-        try {
-            const doc = await userRef.get();
-            if (!doc.exists || score > doc.data().score) {
-                // Сохраняем/обновляем только если счет больше предыдущего
-                await userRef.set({
-                    name: currentUser.email.split('@')[0],
-                    score: score,
-                    ts: Date.now()
-                }, { merge: true });
-            }
-        } catch (e) { console.error("Ошибка сохранения:", e); }
-    }
 }
-
-function start() {
-    player.y = canvas.height/2; player.v = 0; score = 0;
-    obstacles = []; frame = 0;
-    document.getElementById('hud').innerText = "0";
-    gameState = 'PLAY';
-    document.getElementById('menuScreen').classList.add('hidden');
-    document.getElementById('deathScreen').classList.add('hidden');
-    draw();
-}
-
-document.getElementById('startBtn').onclick = start;
-document.getElementById('retryBtn').onclick = start;
 
 document.getElementById('topBtn').onclick = async () => {
-    // Пауза при открытии ТОПа
-    if (gameState === 'PLAY') {
-        prevGameState = 'PLAY';
-        gameState = 'PAUSE';
-    } else {
-        prevGameState = gameState;
-    }
-
-    const lb = document.getElementById('leaderboard');
-    lb.style.display = 'flex';
+    gameState = 'PAUSE';
+    document.getElementById('leaderboard').style.display = 'flex';
     const list = document.getElementById('scoresList');
     list.innerHTML = "Загрузка...";
-    
     const snap = await db.collection("leaderboard").orderBy("score", "desc").get();
     list.innerHTML = "";
     snap.forEach(doc => {
         const d = doc.data();
-        list.innerHTML += `<div class="score-item"><span>${d.name}</span><b>${d.score}</b></div>`;
+        const delBtn = isAdmin ? `<button class="del-btn" onclick="deleteRecord('${doc.id}')">❌</button>` : '';
+        list.innerHTML += `<div class="score-item"><div><span>${d.name}</span><b> ${d.score}</b></div>${delBtn}</div>`;
     });
+};
+
+window.deleteRecord = async (id) => {
+    if(confirm("Удалить рекорд?")) {
+        await db.collection("leaderboard").doc(id).delete();
+        document.getElementById('topBtn').click();
+    }
 };
 
 function closeTop() {
     document.getElementById('leaderboard').style.display = 'none';
-    // Возвращаем из паузы, если играли
-    if (prevGameState === 'PLAY') {
-        gameState = 'PLAY';
-        draw();
-    } else {
-        gameState = prevGameState;
-    }
+    if(score === 0 && obstacles.length === 0) gameState = 'MENU';
+    else if(gameState !== 'DEAD') gameState = 'PLAY';
 }
+
+document.getElementById('startBtn').onclick = () => {
+    player.y = canvas.height/2; player.v = 0; score = 0;
+    obstacles = []; frame = 0; document.getElementById('hud').innerText = "0";
+    gameState = 'PLAY'; document.getElementById('menuScreen').classList.add('hidden');
+    document.getElementById('deathScreen').classList.add('hidden');
+};
+document.getElementById('retryBtn').onclick = () => document.getElementById('startBtn').click();
+
+// Админка
+document.getElementById('adminBtn').onclick = () => document.getElementById('adminPanel').style.display = 'flex';
+document.getElementById('ghostToggle').onclick = function() {
+    isGhostMode = !isGhostMode;
+    this.innerText = `GHOST: ${isGhostMode ? 'ON' : 'OFF'}`;
+};
+document.getElementById('speedBtn').onclick = function() {
+    gameSpeedMult = gameSpeedMult === 1 ? 2 : (gameSpeedMult === 2 ? 0.5 : 1);
+    this.innerText = `SPEED: ${gameSpeedMult === 1 ? 'NORMAL' : (gameSpeedMult === 2 ? 'FAST' : 'SLOW')}`;
+};
+document.getElementById('addScoreBtn').onclick = () => {
+    score += 50; document.getElementById('hud').innerText = score; saveScoreToCloud(score);
+};
 
 window.ontouchstart = (e) => { 
     if(gameState === 'PLAY') { player.v = player.j; e.preventDefault(); }
-    if(gameState === 'DEAD' && e.target.id !== 'retryBtn' && e.target.id !== 'topBtn') start();
+    if(gameState === 'DEAD' && e.target.tagName !== 'BUTTON') document.getElementById('startBtn').click();
 };
-window.onmousedown = () => { if(gameState === 'PLAY') player.v = player.j; };
-
-draw();
 </script>
 </body>
 </html>
